@@ -1,0 +1,155 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// The portal hierarchy, top to bottom. Each role manages the roles below it.
+enum Role {
+  OWNER
+  PRINCIPAL
+  TEACHER
+  STUDENT
+  PARENT
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+}
+
+enum FeeStatus {
+  UNPAID
+  PAID
+}
+
+enum Audience {
+  EVERYONE
+  STAFF
+  STUDENTS
+  PARENTS
+}
+
+model School {
+  id            String         @id @default(cuid())
+  name          String
+  address       String?
+  ownerId       String
+  owner         User           @relation("OwnedSchools", fields: [ownerId], references: [id])
+  members       User[]         @relation("SchoolMembers")
+  classes       ClassRoom[]
+  announcements Announcement[]
+  createdAt     DateTime       @default(now())
+}
+
+model User {
+  id           String  @id @default(cuid())
+  name         String
+  email        String  @unique
+  passwordHash String
+  role         Role
+  phone        String?
+  active       Boolean @default(true)
+
+  // Owners own schools; everyone else belongs to exactly one school.
+  ownedSchools School[] @relation("OwnedSchools")
+  schoolId     String?
+  school       School?  @relation("SchoolMembers", fields: [schoolId], references: [id], onDelete: Cascade)
+
+  // Teacher side
+  classesTaught ClassRoom[]  @relation("ClassTeacher")
+  marksGiven    Grade[]      @relation("GradedBy")
+  attendanceBy  Attendance[] @relation("MarkedBy")
+
+  // Student side
+  classId    String?
+  classRoom  ClassRoom?   @relation("ClassStudents", fields: [classId], references: [id], onDelete: SetNull)
+  rollNo     String?
+  attendance Attendance[] @relation("StudentAttendance")
+  grades     Grade[]      @relation("StudentGrades")
+  fees       Fee[]
+
+  // Parent <-> student links
+  children ParentLink[] @relation("ParentOf")
+  parents  ParentLink[] @relation("ChildOf")
+
+  announcements Announcement[]
+  createdAt     DateTime       @default(now())
+
+  @@index([schoolId, role])
+}
+
+model ParentLink {
+  parentId  String
+  studentId String
+  relation  String @default("Guardian")
+  parent    User   @relation("ParentOf", fields: [parentId], references: [id], onDelete: Cascade)
+  student   User   @relation("ChildOf", fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@id([parentId, studentId])
+}
+
+model ClassRoom {
+  id        String  @id @default(cuid())
+  name      String
+  section   String  @default("A")
+  schoolId  String
+  school    School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  teacherId String?
+  teacher   User?   @relation("ClassTeacher", fields: [teacherId], references: [id], onDelete: SetNull)
+  students  User[]  @relation("ClassStudents")
+
+  @@unique([schoolId, name, section])
+}
+
+model Attendance {
+  id         String           @id @default(cuid())
+  date       DateTime         @db.Date
+  status     AttendanceStatus
+  studentId  String
+  student    User             @relation("StudentAttendance", fields: [studentId], references: [id], onDelete: Cascade)
+  markedById String
+  markedBy   User             @relation("MarkedBy", fields: [markedById], references: [id])
+
+  @@unique([studentId, date])
+}
+
+model Grade {
+  id         String   @id @default(cuid())
+  subject    String
+  exam       String
+  score      Float
+  maxScore   Float    @default(100)
+  studentId  String
+  student    User     @relation("StudentGrades", fields: [studentId], references: [id], onDelete: Cascade)
+  gradedById String
+  gradedBy   User     @relation("GradedBy", fields: [gradedById], references: [id])
+  createdAt  DateTime @default(now())
+}
+
+model Fee {
+  id        String    @id @default(cuid())
+  title     String
+  amount    Float
+  dueDate   DateTime  @db.Date
+  status    FeeStatus @default(UNPAID)
+  paidAt    DateTime?
+  studentId String
+  student   User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+}
+
+model Announcement {
+  id        String   @id @default(cuid())
+  title     String
+  body      String
+  audience  Audience @default(EVERYONE)
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}
