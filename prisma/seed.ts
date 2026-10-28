@@ -64,6 +64,72 @@ async function main() {
       data: { studentId: s.id, title: "Term 1 tuition", amount: 15000, dueDate: new Date(Date.UTC(today.getFullYear(), today.getMonth() + 1, 1)), status: i % 2 ? "PAID" : "UNPAID", paidAt: i % 2 ? today : null },
     });
   }
+  // Subjects and a timetable
+  const subjectNames = ["English", "Maths", "Science", "Social Studies", "Hindi"];
+  for (const cls of [c5, c6]) {
+    const subs = [];
+    for (const [i, name] of subjectNames.entries()) {
+      subs.push(await db.subject.create({ data: { name, classId: cls.id, teacherId: i % 2 === 0 ? t1.id : t2.id } }));
+    }
+    const slots = [];
+    for (let day = 1; day <= 6; day++) {
+      for (let period = 1; period <= (day === 6 ? 4 : 6); period++) {
+        slots.push({ classId: cls.id, day, period, subjectId: subs[(day + period) % subs.length].id });
+      }
+    }
+    await db.timetableSlot.createMany({ data: slots });
+
+    // An exam with marks for every subject
+    const exam = (await db.exam.findFirst({ where: { schoolId: school.id } })) ??
+      (await db.exam.create({ data: { schoolId: school.id, name: "Half-yearly examination", term: "Term 1", published: true } }));
+    const roster = students.filter((s) => s.classId === cls.id);
+    for (const [i, st] of roster.entries()) {
+      await db.examMark.createMany({
+        data: subs.map((sub, j) => ({ examId: exam.id, studentId: st.id, subjectId: sub.id, score: 50 + ((i * 13 + j * 7) % 50), maxScore: 100, enteredById: sub.teacherId! })),
+      });
+    }
+    const hw = await db.homework.create({
+      data: {
+        classId: cls.id,
+        subjectId: subs[1].id,
+        title: "Fractions worksheet",
+        details: "Solve questions 1 to 10 on page 42. Show your working.",
+        dueDate: new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate() + 3)),
+        maxScore: 10,
+        createdById: subs[1].teacherId!,
+      },
+    });
+    await db.submission.create({ data: { homeworkId: hw.id, studentId: roster[1].id, content: "1) 3/4 2) 5/8 …" } });
+  }
+
+  // Admissions pipeline
+  await db.enquiry.createMany({
+    data: [
+      { schoolId: school.id, studentName: "Riya Kulkarni", gradeApplied: "Grade 5", parentName: "Sunita Kulkarni", parentEmail: "sunita@example.com", parentPhone: "9800000001", source: "Website" },
+      { schoolId: school.id, studentName: "Arjun Bose", gradeApplied: "Grade 6", parentName: "Amit Bose", parentEmail: "amit@example.com", parentPhone: "9800000002", source: "Friend", stage: "TEST" },
+      { schoolId: school.id, studentName: "Sara Khan", gradeApplied: "Grade 5", parentName: "Imran Khan", parentEmail: "imran@example.com", parentPhone: "9800000003", stage: "OFFERED" },
+    ],
+  });
+
+  // Library, transport and leave
+  const books = await Promise.all(
+    [
+      ["Wings of Fire", "A. P. J. Abdul Kalam", "Biography"],
+      ["The Jungle Book", "Rudyard Kipling", "Fiction"],
+      ["Malgudi Days", "R. K. Narayan", "Fiction"],
+    ].map(([title, author, category]) => db.book.create({ data: { schoolId: school.id, title, author, category, copies: 3 } })),
+  );
+  await db.bookIssue.create({
+    data: { bookId: books[0].id, memberId: students[0].id, issuedById: owner.id, dueDate: new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate() - 2)) },
+  });
+  const route = await db.route.create({
+    data: { schoolId: school.id, name: "Route 1: North", vehicleNo: "KA-01-AB-1234", driverName: "Ramesh", driverPhone: "9811111111", stops: "Lake View\nMarket Square\nStation Road" },
+  });
+  await db.user.update({ where: { id: students[0].id }, data: { routeId: route.id, stop: "Market Square" } });
+  await db.leave.create({
+    data: { userId: t2.id, type: "Sick", reason: "Fever", fromDate: new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate() + 1)), toDate: new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate() + 2)) },
+  });
+
   await db.announcement.create({
     data: { schoolId: school.id, authorId: owner.id, title: "Welcome to the new portal", body: "Everyone can now sign in to see attendance, marks, fees and news in one place.", audience: "EVERYONE" },
   });

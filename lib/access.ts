@@ -12,6 +12,36 @@ export function canAccessSchool(user: CurrentUser, schoolId: string) {
   return schoolIds(user).includes(schoolId);
 }
 
+// Classes a teacher teaches: as class teacher, or as the teacher of any subject in it.
+export function teachesClassWhere(teacherId: string): Prisma.ClassRoomWhereInput {
+  return { OR: [{ teacherId }, { subjects: { some: { teacherId } } }] };
+}
+
+// A Prisma filter selecting the classes this user may see.
+export function visibleClassesWhere(user: CurrentUser): Prisma.ClassRoomWhereInput {
+  const base: Prisma.ClassRoomWhereInput = { schoolId: { in: schoolIds(user) } };
+  switch (user.role) {
+    case "OWNER":
+    case "PRINCIPAL":
+      return base;
+    case "TEACHER":
+      return { ...base, ...teachesClassWhere(user.id) };
+    case "STUDENT":
+      return { ...base, students: { some: { id: user.id } } };
+    case "PARENT":
+      return { ...base, students: { some: { parents: { some: { parentId: user.id } } } } };
+  }
+}
+
+// Whether the user may set homework, exam marks or the timetable-facing records for a class.
+export async function canTeachClass(user: CurrentUser, classId: string) {
+  if (user.role === "STUDENT" || user.role === "PARENT") return false;
+  const where: Prisma.ClassRoomWhereInput = user.role === "TEACHER"
+    ? { id: classId, schoolId: { in: schoolIds(user) }, ...teachesClassWhere(user.id) }
+    : { id: classId, schoolId: { in: schoolIds(user) } };
+  return (await db.classRoom.count({ where })) > 0;
+}
+
 // A Prisma filter selecting the students this user may see.
 export function visibleStudentsWhere(user: CurrentUser): Prisma.UserWhereInput {
   const base: Prisma.UserWhereInput = { role: "STUDENT", schoolId: { in: schoolIds(user) } };
@@ -20,7 +50,7 @@ export function visibleStudentsWhere(user: CurrentUser): Prisma.UserWhereInput {
     case "PRINCIPAL":
       return base;
     case "TEACHER":
-      return { ...base, classRoom: { teacherId: user.id } };
+      return { ...base, classRoom: teachesClassWhere(user.id) };
     case "STUDENT":
       return { ...base, id: user.id };
     case "PARENT":

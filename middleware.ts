@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, decrypt } from "@/lib/session";
 
-const PUBLIC = ["/login"];
+const PUBLIC = ["/login", "/apply"];
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -11,7 +11,7 @@ export async function middleware(req: NextRequest) {
   if (!session && !isPublic) {
     return NextResponse.redirect(new URL("/login", req.url));
   }
-  if (session && (isPublic || pathname === "/")) {
+  if (session && (pathname === "/login" || pathname === "/")) {
     return NextResponse.redirect(new URL("/dashboard", req.url));
   }
   return NextResponse.next();

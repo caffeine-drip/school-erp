@@ -25,6 +25,9 @@ export default function LoginPage() {
           <h2 className="text-2xl font-semibold">Sign in</h2>
           <p className="mb-6 mt-1 text-sm text-slate-500">Use the account your school gave you.</p>
           <LoginForm />
+          <p className="mt-6 text-center text-sm text-slate-500">
+            New family? <a href="/apply" className="text-brand-600 hover:underline">Make an admission enquiry</a>
+          </p>
         </div>
       </section>
     </main>

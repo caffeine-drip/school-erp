@@ -1,4 +1,5 @@
-import { createFee, setFeePaid } from "@/app/actions/manage";
+import Link from "next/link";
+import { createFee, recordPayment, undoPayment } from "@/app/actions/manage";
 import { ActionForm } from "@/components/ActionForm";
 import { SubmitButton } from "@/components/SubmitButton";
 import { Badge, Empty, PageHeader, Stat, formatDate, formatMoney } from "@/components/ui";
@@ -22,7 +23,7 @@ export default async function FeesPage({ searchParams }: { searchParams: Promise
     }),
     manage ? classesFor(user) : Promise.resolve([]),
     manage ? db.user.findMany({ where: studentScope, orderBy: { name: "asc" } }) : Promise.resolve([]),
-    db.fee.aggregate({ where: { student: studentScope, status: "PAID" }, _sum: { amount: true } }),
+    db.fee.aggregate({ where: { student: studentScope, status: "PAID" }, _sum: { amount: true, concession: true } }),
     db.fee.aggregate({ where: { student: studentScope, status: "UNPAID" }, _sum: { amount: true } }),
   ]);
 
@@ -39,7 +40,7 @@ export default async function FeesPage({ searchParams }: { searchParams: Promise
         </form>
       </PageHeader>
       <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3">
-        <Stat label="Collected" value={formatMoney(paid._sum.amount ?? 0)} />
+        <Stat label="Collected" value={formatMoney((paid._sum.amount ?? 0) - (paid._sum.concession ?? 0))} hint={paid._sum.concession ? `after ${formatMoney(paid._sum.concession)} concessions` : undefined} />
         <Stat label="Outstanding" value={formatMoney(unpaid._sum.amount ?? 0)} />
       </div>
       <div className={`grid gap-6 ${manage ? "lg:grid-cols-3" : ""}`}>
@@ -49,7 +50,7 @@ export default async function FeesPage({ searchParams }: { searchParams: Promise
           ) : (
             <table className="table">
               <thead>
-                <tr><th>Student</th><th>Fee</th><th>Due</th><th>Amount</th><th>Status</th>{manage && <th />}</tr>
+                <tr><th>Student</th><th>Fee</th><th>Due</th><th>Amount</th><th>Status</th><th /></tr>
               </thead>
               <tbody>
                 {fees.map((f) => (
@@ -62,7 +63,10 @@ export default async function FeesPage({ searchParams }: { searchParams: Promise
                     </td>
                     <td>{f.title}</td>
                     <td>{formatDate(f.dueDate)}</td>
-                    <td>{formatMoney(f.amount)}</td>
+                    <td>
+                      {formatMoney(f.amount - f.concession)}
+                      {f.concession > 0 && <div className="text-xs text-slate-500">{formatMoney(f.concession)} concession</div>}
+                    </td>
                     <td>
                       {f.status === "PAID" ? (
                         <Badge tone="green">Paid{f.paidAt ? ` ${formatDate(f.paidAt)}` : ""}</Badge>
@@ -72,13 +76,34 @@ export default async function FeesPage({ searchParams }: { searchParams: Promise
                         <Badge tone="amber">Unpaid</Badge>
                       )}
                     </td>
-                    {manage && (
-                      <td className="text-right">
-                        <form action={setFeePaid.bind(null, f.id, f.status !== "PAID")}>
-                          <button className="btn-ghost">{f.status === "PAID" ? "Mark unpaid" : "Mark paid"}</button>
-                        </form>
-                      </td>
-                    )}
+                    <td className="text-right">
+                      {f.status === "PAID" ? (
+                        <div className="flex justify-end gap-2">
+                          <Link href={`/fees/${f.id}/receipt`} className="btn-ghost">Receipt</Link>
+                          {manage && (
+                            <form action={undoPayment.bind(null, f.id)}>
+                              <button className="btn-danger">Undo</button>
+                            </form>
+                          )}
+                        </div>
+                      ) : manage ? (
+                        <details className="text-left">
+                          <summary className="btn-ghost cursor-pointer list-none">Record payment</summary>
+                          <ActionForm action={recordPayment} className="mt-2 space-y-2">
+                          <input type="hidden" name="feeId" value={f.id} />
+                          <select name="mode" className="input py-1" defaultValue="CASH">
+                            <option value="CASH">Cash</option>
+                            <option value="UPI">UPI</option>
+                            <option value="CARD">Card</option>
+                            <option value="BANK_TRANSFER">Bank</option>
+                            <option value="CHEQUE">Cheque</option>
+                          </select>
+                          <input name="concession" type="number" min={0} step="any" placeholder="Concession (optional)" className="input py-1" />
+                          <SubmitButton>Save and view receipt</SubmitButton>
+                          </ActionForm>
+                        </details>
+                      ) : null}
+                    </td>
                   </tr>
                 ))}
               </tbody>

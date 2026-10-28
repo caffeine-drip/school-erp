@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { AnnouncementList } from "@/components/AnnouncementList";
-import { Badge, Empty, PageHeader, Stat, formatMoney } from "@/components/ui";
+import { Badge, Empty, PageHeader, Stat, formatDate, formatMoney } from "@/components/ui";
 import { schoolIds, visibleStudentIds } from "@/lib/access";
 import { requireUser, type CurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
@@ -37,13 +37,16 @@ export default async function Dashboard() {
 async function AdminStats({ user }: { user: CurrentUser }) {
   const ids = schoolIds(user);
   const inSchools = { schoolId: { in: ids }, active: true };
-  const [principals, teachers, students, parents, classes, unpaid] = await Promise.all([
+  const [principals, teachers, students, parents, classes, unpaid, enquiries, leaves, overdueBooks] = await Promise.all([
     db.user.count({ where: { ...inSchools, role: "PRINCIPAL" } }),
     db.user.count({ where: { ...inSchools, role: "TEACHER" } }),
     db.user.count({ where: { ...inSchools, role: "STUDENT" } }),
     db.user.count({ where: { ...inSchools, role: "PARENT" } }),
     db.classRoom.count({ where: { schoolId: { in: ids } } }),
-    db.fee.aggregate({ where: { status: "UNPAID", student: { schoolId: { in: ids } } }, _sum: { amount: true } }),
+    db.fee.aggregate({ where: { status: "UNPAID", student: { schoolId: { in: ids } } }, _sum: { amount: true, concession: true } }),
+    db.enquiry.count({ where: { schoolId: { in: ids }, stage: { in: ["ENQUIRY", "APPLIED", "TEST", "OFFERED"] } } }),
+    db.leave.count({ where: { status: "PENDING", user: { schoolId: { in: ids }, role: user.role === "OWNER" ? { in: ["PRINCIPAL", "TEACHER"] } : "TEACHER" } } }),
+    db.bookIssue.count({ where: { returnedAt: null, dueDate: { lt: new Date() }, book: { schoolId: { in: ids } } } }),
   ]);
   const rate = await attendanceRate(await visibleStudentIds(user));
 
@@ -56,8 +59,19 @@ async function AdminStats({ user }: { user: CurrentUser }) {
       <Stat label="Parents" value={parents} />
       <Stat label="Classes" value={classes} />
       <Stat label="Attendance" value={rate === null ? "—" : `${rate}%`} hint="All recorded days" />
-      <Stat label="Fees outstanding" value={formatMoney(unpaid._sum.amount ?? 0)} />
+      <Stat label="Fees outstanding" value={formatMoney((unpaid._sum.amount ?? 0) - (unpaid._sum.concession ?? 0))} />
+      <LinkStat href="/admissions" label="Open admissions" value={enquiries} />
+      <LinkStat href="/leave" label="Leave to review" value={leaves} />
+      <LinkStat href="/library" label="Overdue books" value={overdueBooks} />
     </div>
+  );
+}
+
+function LinkStat({ href, label, value }: { href: string; label: string; value: number }) {
+  return (
+    <Link href={href} className="block rounded-xl transition hover:ring-2 hover:ring-brand-100">
+      <Stat label={label} value={value} hint="Open →" />
+    </Link>
   );
 }
 
@@ -98,8 +112,13 @@ async function FamilyStats({ user }: { user: CurrentUser }) {
   const students = await db.user.findMany({
     where: { id: { in: ids } },
     include: {
-      classRoom: { include: { teacher: { select: { name: true } } } },
       grades: { orderBy: { createdAt: "desc" }, take: 3 },
+      classRoom: {
+        include: {
+          teacher: { select: { name: true } },
+          homework: { where: { dueDate: { gte: new Date(Date.now() - 86_400_000) } }, orderBy: { dueDate: "asc" }, take: 3 },
+        },
+      },
       fees: { where: { status: "UNPAID" } },
     },
     orderBy: { name: "asc" },
@@ -142,6 +161,16 @@ async function FamilyStats({ user }: { user: CurrentUser }) {
                 </dd>
               </div>
             </dl>
+            {s.classRoom && s.classRoom.homework.length > 0 && (
+              <div className="mt-4 border-t border-slate-100 pt-3 text-sm">
+                <div className="mb-1 text-slate-500">Homework due</div>
+                {s.classRoom.homework.map((h) => (
+                  <Link key={h.id} href={`/homework/${h.id}`} className="block text-brand-700 hover:underline">
+                    {h.title} · {formatDate(h.dueDate)}
+                  </Link>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}

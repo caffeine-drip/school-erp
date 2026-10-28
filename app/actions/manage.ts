@@ -2,11 +2,13 @@
 
 import bcrypt from "bcryptjs";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { z } from "zod";
 import type { Role } from "@prisma/client";
 import { db } from "@/lib/db";
 import { getCurrentUser, type CurrentUser } from "@/lib/auth";
-import { canAccessSchool, canRecordFor, schoolIds } from "@/lib/access";
+import { canAccessSchool, canRecordFor, canTeachClass, schoolIds } from "@/lib/access";
+import { audit } from "@/lib/audit";
 import { canManage, ROLE_LABEL } from "@/lib/roles";
 import type { FormState } from "./auth";
 
@@ -48,7 +50,8 @@ export async function createSchool(_: FormState, form: FormData): Promise<FormSt
   try {
     const user = await actor(["OWNER"]);
     const data = SchoolSchema.parse(Object.fromEntries(form));
-    await db.school.create({ data: { ...data, ownerId: user.id } });
+    const school = await db.school.create({ data: { ...data, ownerId: user.id } });
+    await audit(user, "school.create", `Created school ${data.name}`, school.id);
     revalidatePath("/", "layout");
     return { ok: `Created ${data.name}.` };
   } catch (e) {
@@ -87,6 +90,7 @@ export async function createPerson(_: FormState, form: FormData): Promise<FormSt
       if (child?.role !== "STUDENT" || child.schoolId !== data.schoolId) throw new Error("Pick a student from this school");
     }
 
+    await audit(user, "user.create", `Added ${ROLE_LABEL[data.role].toLowerCase()} ${data.name} (${data.email})`, data.schoolId);
     await db.user.create({
       data: {
         role: data.role,
@@ -112,8 +116,9 @@ export async function createPerson(_: FormState, form: FormData): Promise<FormSt
 
 export async function setActive(userId: string, active: boolean) {
   const user = await actor();
-  await manageable(user, userId);
+  const target = await manageable(user, userId);
   await db.user.update({ where: { id: userId }, data: { active } });
+  await audit(user, active ? "user.enable" : "user.disable", `${active ? "Enabled" : "Disabled"} ${target.name}`, target.schoolId);
   revalidatePath("/", "layout");
 }
 
@@ -125,6 +130,7 @@ export async function resetPassword(_: FormState, form: FormData): Promise<FormS
     const data = ResetSchema.parse(Object.fromEntries(form));
     const target = await manageable(user, data.userId);
     await db.user.update({ where: { id: target.id }, data: { passwordHash: await bcrypt.hash(data.password, 10) } });
+    await audit(user, "user.password_reset", `Reset password for ${target.name}`, target.schoolId);
     return { ok: `Password reset for ${target.name}.` };
   } catch (e) {
     return fail(e);
@@ -215,6 +221,7 @@ export async function createClass(_: FormState, form: FormData): Promise<FormSta
     if (!canAccessSchool(user, data.schoolId)) throw new Error("Not allowed for that school");
     await assertTeacherIn(data.teacherId, data.schoolId);
     await db.classRoom.create({ data });
+    await audit(user, "class.create", `Created class ${data.name}-${data.section}`, data.schoolId);
     revalidatePath("/classes");
     return { ok: `Created class ${data.name}-${data.section}.` };
   } catch (e) {
@@ -240,10 +247,14 @@ export async function assignTeacher(_: FormState, form: FormData): Promise<FormS
 
 // ---------- Attendance & grades ----------
 
-async function classForRecording(user: CurrentUser, classId: string) {
+// Attendance is the class teacher's job; marks can also come from a subject teacher.
+async function classForRecording(user: CurrentUser, classId: string, { classTeacherOnly = true } = {}) {
   const cls = await db.classRoom.findUnique({ where: { id: classId }, include: { students: { select: { id: true } } } });
   if (!cls || !canAccessSchool(user, cls.schoolId)) throw new Error("Not allowed");
-  if (user.role === "TEACHER" && cls.teacherId !== user.id) throw new Error("Only the class teacher can record for this class");
+  if (user.role === "TEACHER") {
+    const allowed = classTeacherOnly ? cls.teacherId === user.id : await canTeachClass(user, cls.id);
+    if (!allowed) throw new Error("Only the class teacher can record for this class");
+  }
   return cls;
 }
 
@@ -285,7 +296,7 @@ export async function saveGrades(_: FormState, form: FormData): Promise<FormStat
   try {
     const user = await actor(["OWNER", "PRINCIPAL", "TEACHER"]);
     const header = GradeHeader.parse(Object.fromEntries(form));
-    const cls = await classForRecording(user, header.classId);
+    const cls = await classForRecording(user, header.classId, { classTeacherOnly: false });
     const rows = cls.students.flatMap((s) => {
       const raw = String(form.get(`score_${s.id}`) ?? "").trim();
       if (raw === "") return [];
@@ -348,14 +359,57 @@ export async function createFee(_: FormState, form: FormData): Promise<FormState
   }
 }
 
-export async function setFeePaid(feeId: string, paid: boolean) {
-  const user = await actor(["OWNER", "PRINCIPAL"]);
+async function feeInScope(user: CurrentUser, feeId: string) {
   const fee = await db.fee.findUnique({ where: { id: feeId }, include: { student: true } });
   if (!fee?.student.schoolId || !canAccessSchool(user, fee.student.schoolId)) throw new Error("Not allowed");
-  await db.fee.update({
-    where: { id: feeId },
-    data: { status: paid ? "PAID" : "UNPAID", paidAt: paid ? new Date() : null },
-  });
+  return fee;
+}
+
+const PaymentSchema = z.object({
+  feeId: z.string(),
+  mode: z.enum(["CASH", "UPI", "CARD", "BANK_TRANSFER", "CHEQUE"]),
+  concession: z.coerce.number().min(0).default(0),
+});
+
+export async function recordPayment(_: FormState, form: FormData): Promise<FormState> {
+  let paid = false;
+  let data: z.infer<typeof PaymentSchema>;
+  try {
+    const user = await actor(["OWNER", "PRINCIPAL"]);
+    data = PaymentSchema.parse(Object.fromEntries(form));
+    const fee = await feeInScope(user, data.feeId);
+    if (fee.status === "PAID") throw new Error("Already paid");
+    if (data.concession > fee.amount) throw new Error("Concession can't be more than the fee");
+    const year = new Date().getFullYear();
+    // Receipt numbers run per year; retry if two payments race for the same number.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const count = await db.fee.count({ where: { receiptNo: { startsWith: `R${year}-` } } });
+      const receiptNo = `R${year}-${String(count + 1 + attempt).padStart(5, "0")}`;
+      try {
+        await db.fee.update({
+          where: { id: fee.id },
+          data: { status: "PAID", paidAt: new Date(), paymentMode: data.mode, concession: data.concession, receiptNo },
+        });
+        await audit(user, "fee.paid", `Recorded ${receiptNo} for ${fee.student.name}: ${fee.title}`, fee.student.schoolId);
+        revalidatePath("/fees");
+        paid = true;
+        break;
+      } catch (e) {
+        if (!(e && typeof e === "object" && "code" in e && e.code === "P2002")) throw e;
+      }
+    }
+    if (!paid) throw new Error("Couldn't allocate a receipt number, try again");
+  } catch (e) {
+    return fail(e);
+  }
+  redirect(`/fees/${data.feeId}/receipt`);
+}
+
+export async function undoPayment(feeId: string) {
+  const user = await actor(["OWNER", "PRINCIPAL"]);
+  const fee = await feeInScope(user, feeId);
+  await db.fee.update({ where: { id: fee.id }, data: { status: "UNPAID", paidAt: null, paymentMode: null, receiptNo: null } });
+  await audit(user, "fee.unpaid", `Reversed payment ${fee.receiptNo ?? ""} for ${fee.student.name}: ${fee.title}`, fee.student.schoolId);
   revalidatePath("/fees");
 }
 
@@ -374,6 +428,7 @@ export async function createAnnouncement(_: FormState, form: FormData): Promise<
     const data = AnnouncementSchema.parse(Object.fromEntries(form));
     if (!canAccessSchool(user, data.schoolId)) throw new Error("Not allowed for that school");
     await db.announcement.create({ data: { ...data, authorId: user.id } });
+    await audit(user, "announcement.create", `Posted "${data.title}" to ${data.audience.toLowerCase()}`, data.schoolId);
     revalidatePath("/announcements");
     revalidatePath("/dashboard");
     return { ok: "Announcement posted." };

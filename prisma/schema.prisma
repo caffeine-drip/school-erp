@@ -27,6 +27,29 @@ enum FeeStatus {
   PAID
 }
 
+enum PaymentMode {
+  CASH
+  UPI
+  CARD
+  BANK_TRANSFER
+  CHEQUE
+}
+
+enum EnquiryStage {
+  ENQUIRY
+  APPLIED
+  TEST
+  OFFERED
+  ADMITTED
+  REJECTED
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum Audience {
   EVERYONE
   STAFF
@@ -43,6 +66,11 @@ model School {
   members       User[]         @relation("SchoolMembers")
   classes       ClassRoom[]
   announcements Announcement[]
+  exams         Exam[]
+  enquiries     Enquiry[]
+  books         Book[]
+  routes        Route[]
+  auditLogs     AuditLog[]
   createdAt     DateTime       @default(now())
 }
 
@@ -78,7 +106,27 @@ model User {
   parents  ParentLink[] @relation("ChildOf")
 
   announcements Announcement[]
-  createdAt     DateTime       @default(now())
+
+  // Academics
+  subjectsTaught Subject[]    @relation("SubjectTeacher")
+  homeworkSet    Homework[]
+  submissions    Submission[]
+  examMarks      ExamMark[]   @relation("ExamMarkStudent")
+  examMarksGiven ExamMark[]   @relation("ExamMarkBy")
+  examRemarks    ExamRemark[]
+
+  // Operations
+  leaves         Leave[]     @relation("LeaveApplicant")
+  leavesReviewed Leave[]     @relation("LeaveReviewer")
+  bookIssues     BookIssue[] @relation("BookMember")
+  booksIssued    BookIssue[] @relation("BookIssuer")
+  routeId        String?
+  route          Route?      @relation(fields: [routeId], references: [id], onDelete: SetNull)
+  stop           String?
+  auditLogs      AuditLog[]
+  admittedFrom   Enquiry?    @relation("EnquiryStudent")
+
+  createdAt DateTime @default(now())
 
   @@index([schoolId, role])
 }
@@ -94,14 +142,17 @@ model ParentLink {
 }
 
 model ClassRoom {
-  id        String  @id @default(cuid())
+  id        String          @id @default(cuid())
   name      String
-  section   String  @default("A")
+  section   String          @default("A")
   schoolId  String
-  school    School  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  school    School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   teacherId String?
-  teacher   User?   @relation("ClassTeacher", fields: [teacherId], references: [id], onDelete: SetNull)
-  students  User[]  @relation("ClassStudents")
+  teacher   User?           @relation("ClassTeacher", fields: [teacherId], references: [id], onDelete: SetNull)
+  students  User[]          @relation("ClassStudents")
+  subjects  Subject[]
+  timetable TimetableSlot[]
+  homework  Homework[]
 
   @@unique([schoolId, name, section])
 }
@@ -132,14 +183,18 @@ model Grade {
 }
 
 model Fee {
-  id        String    @id @default(cuid())
-  title     String
-  amount    Float
-  dueDate   DateTime  @db.Date
-  status    FeeStatus @default(UNPAID)
-  paidAt    DateTime?
-  studentId String
-  student   User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  id          String       @id @default(cuid())
+  title       String
+  amount      Float
+  dueDate     DateTime     @db.Date
+  status      FeeStatus    @default(UNPAID)
+  paidAt      DateTime?
+  // Discount granted on this fee; the payable amount is amount - concession.
+  concession  Float        @default(0)
+  paymentMode PaymentMode?
+  receiptNo   String?      @unique
+  studentId   String
+  student     User         @relation(fields: [studentId], references: [id], onDelete: Cascade)
 }
 
 model Announcement {
@@ -152,4 +207,185 @@ model Announcement {
   authorId  String
   author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
+}
+
+model Subject {
+  id        String          @id @default(cuid())
+  name      String
+  classId   String
+  classRoom ClassRoom       @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacherId String?
+  teacher   User?           @relation("SubjectTeacher", fields: [teacherId], references: [id], onDelete: SetNull)
+  slots     TimetableSlot[]
+  homework  Homework[]
+  examMarks ExamMark[]
+
+  @@unique([classId, name])
+}
+
+// One cell of a class's weekly timetable. day is 1 (Mon) to 6 (Sat).
+model TimetableSlot {
+  id        String    @id @default(cuid())
+  classId   String
+  classRoom ClassRoom @relation(fields: [classId], references: [id], onDelete: Cascade)
+  day       Int
+  period    Int
+  subjectId String
+  subject   Subject   @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, day, period])
+}
+
+model Homework {
+  id          String       @id @default(cuid())
+  title       String
+  details     String
+  dueDate     DateTime     @db.Date
+  maxScore    Float?
+  classId     String
+  classRoom   ClassRoom    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  subjectId   String?
+  subject     Subject?     @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  createdById String
+  createdBy   User         @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  submissions Submission[]
+  createdAt   DateTime     @default(now())
+}
+
+model Submission {
+  id          String   @id @default(cuid())
+  homeworkId  String
+  homework    Homework @relation(fields: [homeworkId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  content     String
+  score       Float?
+  feedback    String?
+  submittedAt DateTime @default(now())
+
+  @@unique([homeworkId, studentId])
+}
+
+model Exam {
+  id        String       @id @default(cuid())
+  name      String
+  term      String
+  schoolId  String
+  school    School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  published Boolean      @default(false)
+  marks     ExamMark[]
+  remarks   ExamRemark[]
+  createdAt DateTime     @default(now())
+}
+
+model ExamMark {
+  id          String  @id @default(cuid())
+  examId      String
+  exam        Exam    @relation(fields: [examId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     User    @relation("ExamMarkStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  subjectId   String
+  subject     Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  score       Float
+  maxScore    Float   @default(100)
+  enteredById String
+  enteredBy   User    @relation("ExamMarkBy", fields: [enteredById], references: [id])
+
+  @@unique([examId, studentId, subjectId])
+}
+
+// The class teacher's overall remark on a student's report card.
+model ExamRemark {
+  examId    String
+  exam      Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  remark    String
+
+  @@id([examId, studentId])
+}
+
+model Enquiry {
+  id           String       @id @default(cuid())
+  schoolId     String
+  school       School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  studentName  String
+  dateOfBirth  DateTime?    @db.Date
+  gradeApplied String
+  parentName   String
+  parentEmail  String
+  parentPhone  String
+  source       String?
+  notes        String?
+  stage        EnquiryStage @default(ENQUIRY)
+  studentId    String?      @unique
+  student      User?        @relation("EnquiryStudent", fields: [studentId], references: [id], onDelete: SetNull)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+}
+
+model Leave {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation("LeaveApplicant", fields: [userId], references: [id], onDelete: Cascade)
+  fromDate     DateTime    @db.Date
+  toDate       DateTime    @db.Date
+  type         String
+  reason       String
+  status       LeaveStatus @default(PENDING)
+  reviewedById String?
+  reviewedBy   User?       @relation("LeaveReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime    @default(now())
+}
+
+model Book {
+  id       String      @id @default(cuid())
+  schoolId String
+  school   School      @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  title    String
+  author   String
+  isbn     String?
+  category String?
+  copies   Int         @default(1)
+  issues   BookIssue[]
+}
+
+model BookIssue {
+  id         String    @id @default(cuid())
+  bookId     String
+  book       Book      @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  memberId   String
+  member     User      @relation("BookMember", fields: [memberId], references: [id], onDelete: Cascade)
+  issuedById String
+  issuedBy   User      @relation("BookIssuer", fields: [issuedById], references: [id])
+  issuedAt   DateTime  @default(now())
+  dueDate    DateTime  @db.Date
+  returnedAt DateTime?
+  fine       Float     @default(0)
+}
+
+model Route {
+  id          String @id @default(cuid())
+  schoolId    String
+  school      School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  name        String
+  vehicleNo   String
+  driverName  String
+  driverPhone String
+  // Stops in pickup order, one per line.
+  stops       String
+  riders      User[]
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  schoolId  String?
+  school    School?  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  actorId   String
+  actor     User     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  action    String
+  detail    String
+  createdAt DateTime @default(now())
+
+  @@index([schoolId, createdAt])
 }

@@ -1,6 +1,6 @@
 import { db } from "./db";
 import type { CurrentUser } from "./auth";
-import { audiencesFor, schoolIds } from "./access";
+import { audiencesFor, schoolIds, teachesClassWhere } from "./access";
 
 export function announcementsFor(user: CurrentUser, take?: number) {
   return db.announcement.findMany({
@@ -18,7 +18,7 @@ export function classesFor(user: CurrentUser) {
   return db.classRoom.findMany({
     where: {
       schoolId: { in: schoolIds(user) },
-      ...(user.role === "TEACHER" ? { teacherId: user.id } : {}),
+      ...(user.role === "TEACHER" ? teachesClassWhere(user.id) : {}),
     },
     include: { teacher: { select: { id: true, name: true } }, school: { select: { name: true } }, _count: { select: { students: true } } },
     orderBy: [{ name: "asc" }, { section: "asc" }],
